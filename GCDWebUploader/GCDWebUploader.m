@@ -32,6 +32,7 @@
 #import <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #else
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
@@ -56,6 +57,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable GCDWebServerResponse*)moveItem:(GCDWebServerURLEncodedFormRequest*)request;
 - (nullable GCDWebServerResponse*)deleteItem:(GCDWebServerURLEncodedFormRequest*)request;
 - (nullable GCDWebServerResponse*)createDirectory:(GCDWebServerURLEncodedFormRequest*)request;
+- (BOOL)creatForder:(NSString *)forderName;
+- (BOOL)isDirExist:(NSString *)forderName;
 @end
 
 NS_ASSUME_NONNULL_END
@@ -74,9 +77,13 @@ NS_ASSUME_NONNULL_END
     if (siteBundle == nil) {
       return nil;
     }
+      
+    if (![self isDirExist:[path stringByAppendingPathComponent:@".cache"]]) {
+        [self creatForder:[path stringByAppendingPathComponent:@".cache"]];
+    }
+
     _uploadDirectory = [path copy];
     GCDWebUploader* __unsafe_unretained server = self;
-
     // Resource files
     [self addGETHandlerForBasePath:@"/" directoryPath:(NSString*)[siteBundle resourcePath] indexFilename:nil cacheAge:3600 allowRangeRequests:NO];
 
@@ -247,17 +254,23 @@ NS_ASSUME_NONNULL_END
   for (NSString* item in [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
     if (_allowHiddenItems || ![item hasPrefix:@"."]) {
       NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[absolutePath stringByAppendingPathComponent:item] error:NULL];
-      NSString* type = [attributes objectForKey:NSFileType];
+        NSString* type = [attributes objectForKey:NSFileType];
+        NSDate *date = [attributes fileCreationDate];
+        NSDateFormatter *dateFormat = [[NSDateFormatter alloc] init];
+        [dateFormat setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
       if ([type isEqualToString:NSFileTypeRegular] && [self _checkFileExtension:item]) {
         [array addObject:@{
           @"path" : [relativePath stringByAppendingPathComponent:item],
           @"name" : item,
+          @"date" : [dateFormat stringFromDate:date],
           @"size" : (NSNumber*)[attributes objectForKey:NSFileSize]
         }];
       } else if ([type isEqualToString:NSFileTypeDirectory]) {
         [array addObject:@{
           @"path" : [[relativePath stringByAppendingPathComponent:item] stringByAppendingString:@"/"],
-          @"name" : item
+          @"name" : item,
+          @"date" : [dateFormat stringFromDate:date],
+          @"size" : @0
         }];
       }
     }
@@ -311,6 +324,7 @@ NS_ASSUME_NONNULL_END
 
   if ([self.delegate respondsToSelector:@selector(webUploader:didUploadFileAtPath:)]) {
     dispatch_async(dispatch_get_main_queue(), ^{
+      [self createVideoCover:absolutePath];
       [self.delegate webUploader:self didUploadFileAtPath:absolutePath];
     });
   }
@@ -409,6 +423,94 @@ NS_ASSUME_NONNULL_END
     });
   }
   return [GCDWebServerDataResponse responseWithJSONObject:@{}];
+}
+
+- (void)createVideoCover:(NSString *)videoPath {
+    AVURLAsset *asset = [[AVURLAsset alloc] initWithURL:[NSURL fileURLWithPath:videoPath] options:nil];
+    AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+    gen.maximumSize = CGSizeMake(500, 500);
+    gen.appliesPreferredTrackTransform = YES;
+    CMTime time = CMTimeMakeWithSeconds(0.0, 600);
+    NSError *error = nil;
+    CMTime actualTime;
+    CGImageRef image = [gen copyCGImageAtTime:time actualTime:&actualTime error:&error];
+    UIImage *img = [[UIImage alloc] initWithCGImage:image];
+    CGImageRelease(image);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *data = [self compress:img maxLength:512000];
+        [data writeToFile:[self pngPath:videoPath.lastPathComponent] atomically:YES];
+    });
+}
+
+-(NSData *)compress:(UIImage *)image maxLength:(NSUInteger)maxLength{
+    // Compress by quality
+    CGFloat compression = 1;
+    NSData *data = UIImageJPEGRepresentation(image, compression);
+    //NSLog(@"Before compressing quality, image size = %ld KB",data.length/1024);
+    if (data.length < maxLength) return data;
+    
+    CGFloat max = 1;
+    CGFloat min = 0;
+    for (int i = 0; i < 6; ++i) {
+        compression = (max + min) / 2;
+        data = UIImageJPEGRepresentation(image, compression);
+        //NSLog(@"Compression = %.1f", compression);
+        //NSLog(@"In compressing quality loop, image size = %ld KB", data.length / 1024);
+        if (data.length < maxLength * 0.9) {
+            min = compression;
+        } else if (data.length > maxLength) {
+            max = compression;
+        } else {
+            break;
+        }
+    }
+    //NSLog(@"After compressing quality, image size = %ld KB", data.length / 1024);
+    if (data.length < maxLength) return data;
+    UIImage *resultImage = [UIImage imageWithData:data];
+    // Compress by size
+    NSUInteger lastDataLength = 0;
+    while (data.length > maxLength && data.length != lastDataLength) {
+        lastDataLength = data.length;
+        CGFloat ratio = (CGFloat)maxLength / data.length;
+        //NSLog(@"Ratio = %.1f", ratio);
+        CGSize size = CGSizeMake((NSUInteger)(resultImage.size.width * sqrtf(ratio)),
+                                 (NSUInteger)(resultImage.size.height * sqrtf(ratio))); // Use NSUInteger to prevent white blank
+        UIGraphicsBeginImageContext(size);
+        [resultImage drawInRect:CGRectMake(0, 0, size.width, size.height)];
+        resultImage = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        data = UIImageJPEGRepresentation(resultImage, compression);
+    }
+    return data;
+}
+
+- (BOOL)creatForder:(NSString *)forderName {
+    NSFileManager *manger = [NSFileManager defaultManager];
+    BOOL dir        = NO;
+    BOOL exist       = [manger fileExistsAtPath:forderName isDirectory:&dir];
+    // 文件不存在
+    if (!exist&&!dir) {
+        return [manger createDirectoryAtPath:forderName withIntermediateDirectories:YES attributes:nil error:nil];
+    } else {
+        return NO;
+    }
+}
+
+- (BOOL)isDirExist:(NSString *)forderName {
+    NSFileManager *manger = [NSFileManager defaultManager];
+    BOOL dir  = NO;
+    BOOL exist = [manger fileExistsAtPath:forderName isDirectory:&dir];
+    if (!exist && !dir) {
+        return NO;
+    } else {
+        return YES;
+    }
+}
+
+- (NSString *)pngPath:(NSString *)fileName {
+    NSString *ext = fileName.pathExtension;
+    NSString *newName = [fileName stringByReplacingOccurrencesOfString:ext withString:@"png"];
+    return [NSString stringWithFormat:@"%@/.cache/%@", self.uploadDirectory, newName];
 }
 
 @end

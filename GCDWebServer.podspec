@@ -19,7 +19,7 @@ Pod::Spec.new do |s|
   s.osx.deployment_target = '10.7'
   s.requires_arc = true
   
-  s.default_subspec = 'Core'
+  s.default_subspec = 'Core','WebDAV','WebUploader'
   
   s.subspec 'Core' do |cs|
     cs.source_files = 'GCDWebServer/**/*.{h,m}'
@@ -48,5 +48,15 @@ Pod::Spec.new do |s|
     cs.source_files = 'GCDWebUploader/*.{h,m}'
     cs.requires_arc = true
     cs.resource = "GCDWebUploader/GCDWebUploader.bundle"
-  end 
+  end
+  
+#  s.subspec 'SMBClient' do |cs|
+#    cs.dependency 'GCDWebServer/Core'
+#    cs.source_files = 'BMSClient/*.{h,m}'
+#    #cs.preserve_paths = "BMSClient/libdsm/bdsm/**"
+#    cs.ios.vendored_libraries = "BMSClient/libdsm/*.{a}"
+#    cs.requires_arc = true
+#    cs.library = 'iconv'
+#    cs.resource = "BMSClient/BMSClient.bundle"
+#  end
 end
